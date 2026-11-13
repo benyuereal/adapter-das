@@ -66,6 +66,10 @@ def top_k_renorm_probs_alias(probs, top_ks):  # noqa: N802 - upstream plural fac
     return top_k_renorm_prob(probs, top_ks)
 
 
+def top_p_renorm_probs_alias(probs, top_ps):  # noqa: N802 - upstream plural face
+    return top_p_renorm_prob(probs, top_ps)
+
+
 # flashinfer.sampling.softmax face — dspark verify SoftmaxTemp hot path
 # (dspark_accept.softmax_temp_flashinfer). Runs once per decode step on
 # [bs*gamma, vocab] logits inside the CUDA-graph region, so it is a triton

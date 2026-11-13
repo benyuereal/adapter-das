@@ -120,7 +120,9 @@ def register() -> None:
         from sgl_kernel.sampling import (
             min_p_sampling_from_probs,
             softmax,
+            top_k_renorm_probs_alias,
             top_k_top_p_sampling_from_probs,
+            top_p_renorm_prob,
         )
 
         _FI_SAMPLING_ALLOW = {
@@ -128,6 +130,8 @@ def register() -> None:
                 "min_p_sampling_from_probs": min_p_sampling_from_probs,
                 "softmax": softmax,
                 "top_k_top_p_sampling_from_probs": top_k_top_p_sampling_from_probs,
+                "top_k_renorm_probs": top_k_renorm_probs_alias,
+                "top_p_renorm_probs": top_p_renorm_prob,
             },
         }
         _f = next(
@@ -153,6 +157,20 @@ def register() -> None:
                 mechanism=_reg.MECH_SEAM,
                 detail="triton port (online 2-pass row softmax with per-row"
                 " temperature); dspark verify SoftmaxTemp hot path",
+            )
+            _reg.register(
+                "sampling",
+                top_k_renorm_probs_alias,
+                target="flashinfer.sampling:top_k_renorm_probs",
+                mechanism=_reg.MECH_SEAM,
+                detail="torch reference tier; plural face of top_k_renorm_prob",
+            )
+            _reg.register(
+                "sampling",
+                top_p_renorm_prob,
+                target="flashinfer.sampling:top_p_renorm_probs",
+                mechanism=_reg.MECH_SEAM,
+                detail="torch reference tier; plural face of top_p_renorm_prob",
             )
         except Exception:
             pass

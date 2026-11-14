@@ -26,25 +26,29 @@ def _row_parameter(value, probs, *, dtype):
 def top_k_renorm_prob(probs, top_ks):
     probs = probs.float()
     k = _row_parameter(top_ks, probs, dtype=torch.long).clamp(1, probs.shape[1])
-    sorted_probs, indices = torch.sort(
-        probs, dim=-1, descending=True, stable=True
-    )
-    keep = torch.arange(probs.shape[1], device=probs.device) < k
-    selected = sorted_probs * keep
+    # Only k entries per row survive, and the full-vocab sort OOMs once the KV
+    # pool is committed.
+    kk = int(k.max().item())
+    vals, indices = torch.topk(probs, kk, dim=-1, largest=True, sorted=True)
+    keep = torch.arange(kk, device=probs.device) < k
+    selected = vals * keep
     selected = selected / selected.sum(dim=-1, keepdim=True).clamp_min(1e-10)
-    return torch.zeros_like(selected).scatter_(1, indices, selected)
+    return torch.zeros_like(probs).scatter_(1, indices, selected)
 
 
 def top_p_renorm_prob(probs, top_ps):
     probs = probs.float()
     p = _row_parameter(top_ps, probs, dtype=torch.float32).clamp(0.0, 1.0)
-    sp, idx = torch.sort(probs, dim=-1, descending=True)
-    cum = sp.cumsum(dim=-1)
-    keep = (cum - sp) < p  # smallest prefix covering p; keeps at least 1
-    sp = sp * keep
-    sp = sp / sp.sum(dim=-1, keepdim=True).clamp_min(1e-10)
-    out = torch.zeros_like(sp)
-    out.scatter_(1, idx, sp)
+    vocab = probs.shape[1]
+    # Threshold form: avoids the int64 index tile a descending sort + scatter
+    # needs, which pushed verify to OOM at bs 40.
+    sp = torch.sort(probs, dim=-1).values
+    cdf = sp.cumsum(dim=-1)
+    cutoff = torch.searchsorted(cdf, (1.0 - p).contiguous(), right=False)
+    cutoff = cutoff.clamp_(max=vocab - 1)
+    pivot = torch.gather(sp, 1, cutoff)
+    out = probs * (probs >= pivot)
+    out /= out.sum(dim=-1, keepdim=True).clamp_min(1e-10)
     return out
 
 

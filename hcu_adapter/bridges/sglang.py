@@ -126,6 +126,18 @@ def install() -> None:
             logging.getLogger("hcu.adapter").warning(
                 "HCU adapter: kv stride text patch not installed", exc_info=True
             )
+        # Default-off diagnostic for the hipBLASLt bf16 down_proj write-loss
+        # (stale 1e37/NaN buffer -> NaN logits). A healthy output is untouched;
+        # a corrupt one is recomputed through F.linear. Enable with
+        # SGLANG_FIX_MLP_DOWNPROJ_GUARD=1; the root fix is the vendor GEMM.
+        try:
+            from hcu_adapter import mlp_downproj_guard
+
+            mlp_downproj_guard.install()
+        except Exception:
+            logging.getLogger("hcu.adapter").warning(
+                "HCU adapter: mlp down_proj guard not installed", exc_info=True
+            )
         # Compile adapted csrc/include assets from an immutable adapter cache.
         # Community sources remain untouched; cached function aliases are retained.
         try:

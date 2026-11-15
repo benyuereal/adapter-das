@@ -15,9 +15,15 @@ whose cumulative mass reaches p (cumsum-before-current < p).
 
 import torch
 
-# Rows per renormalization pass. The full-vocab fp32 scratch (not the result) is
-# what runs the pool dry at bs 36-40 with five draft rows per request.
-_RENORM_ROW_CHUNK = 32
+# fp32 scratch per renormalization pass. The full-vocab scratch (not the result)
+# is what runs the pool dry at bs 36-40 with five draft rows per request, so the
+# chunk is an element budget rather than a row count: wide vocabularies get few
+# rows, small ones keep the launch count down.
+_RENORM_ELEMENT_BUDGET = 1 << 22
+
+
+def _rows_per_chunk(rows: int, vocab: int) -> int:
+    return max(1, min(rows, _RENORM_ELEMENT_BUDGET // max(1, vocab)))
 
 
 def _row_parameter(value, probs, *, dtype):
@@ -41,8 +47,9 @@ def top_k_renorm_prob(probs, top_ks):
     kk = int(k.max().item())
     keep = torch.arange(kk, device=probs.device) < k
     out = torch.zeros(probs.shape, dtype=torch.float32, device=probs.device)
-    for r0 in range(0, probs.shape[0], _RENORM_ROW_CHUNK):
-        r1 = r0 + _RENORM_ROW_CHUNK
+    step = _rows_per_chunk(probs.shape[0], probs.shape[1])
+    for r0 in range(0, probs.shape[0], step):
+        r1 = r0 + step
         vals, indices = torch.topk(
             probs[r0:r1].float(), kk, dim=-1, largest=True, sorted=True
         )
@@ -56,8 +63,9 @@ def top_p_renorm_prob(probs, top_ps):
     p = _row_parameter(top_ps, probs, dtype=torch.float32).clamp(0.0, 1.0)
     out = torch.empty(probs.shape, dtype=torch.float32, device=probs.device)
     vocab = probs.shape[1]
-    for r0 in range(0, probs.shape[0], _RENORM_ROW_CHUNK):
-        r1 = r0 + _RENORM_ROW_CHUNK
+    step = _rows_per_chunk(probs.shape[0], probs.shape[1])
+    for r0 in range(0, probs.shape[0], step):
+        r1 = r0 + step
         row = probs[r0:r1].float()
         # Threshold form: avoids the int64 index tile a descending sort +
         # scatter needs, which pushed verify to OOM at bs 40.
@@ -68,7 +76,8 @@ def top_p_renorm_prob(probs, top_ps):
         )
         cutoff = cutoff.clamp_(max=vocab - 1)
         pivot = torch.gather(sp, 1, cutoff)
-        out[r0:r1] = row * (row >= pivot)
+        out[r0:r1].copy_(row)
+        out[r0:r1].mul_(row >= pivot)
         out[r0:r1] /= out[r0:r1].sum(dim=-1, keepdim=True).clamp_min(1e-10)
     return out
 

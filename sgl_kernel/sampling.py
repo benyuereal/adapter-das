@@ -15,6 +15,10 @@ whose cumulative mass reaches p (cumsum-before-current < p).
 
 import torch
 
+# Rows per renormalization pass. The full-vocab fp32 scratch (not the result) is
+# what runs the pool dry at bs 36-40 with five draft rows per request.
+_RENORM_ROW_CHUNK = 32
+
 
 def _row_parameter(value, probs, *, dtype):
     parameter = torch.as_tensor(value, device=probs.device, dtype=dtype)
@@ -24,31 +28,41 @@ def _row_parameter(value, probs, *, dtype):
 
 
 def top_k_renorm_prob(probs, top_ks):
-    probs = probs.float()
     k = _row_parameter(top_ks, probs, dtype=torch.long).clamp(1, probs.shape[1])
     # Only k entries per row survive, and the full-vocab sort OOMs once the KV
     # pool is committed.
     kk = int(k.max().item())
-    vals, indices = torch.topk(probs, kk, dim=-1, largest=True, sorted=True)
     keep = torch.arange(kk, device=probs.device) < k
-    selected = vals * keep
-    selected = selected / selected.sum(dim=-1, keepdim=True).clamp_min(1e-10)
-    return torch.zeros_like(probs).scatter_(1, indices, selected)
+    out = torch.zeros(probs.shape, dtype=torch.float32, device=probs.device)
+    for r0 in range(0, probs.shape[0], _RENORM_ROW_CHUNK):
+        r1 = r0 + _RENORM_ROW_CHUNK
+        vals, indices = torch.topk(
+            probs[r0:r1].float(), kk, dim=-1, largest=True, sorted=True
+        )
+        selected = vals * keep[r0:r1]
+        selected = selected / selected.sum(dim=-1, keepdim=True).clamp_min(1e-10)
+        out[r0:r1].scatter_(1, indices, selected)
+    return out
 
 
 def top_p_renorm_prob(probs, top_ps):
-    probs = probs.float()
     p = _row_parameter(top_ps, probs, dtype=torch.float32).clamp(0.0, 1.0)
+    out = torch.empty(probs.shape, dtype=torch.float32, device=probs.device)
     vocab = probs.shape[1]
-    # Threshold form: avoids the int64 index tile a descending sort + scatter
-    # needs, which pushed verify to OOM at bs 40.
-    sp = torch.sort(probs, dim=-1).values
-    cdf = sp.cumsum(dim=-1)
-    cutoff = torch.searchsorted(cdf, (1.0 - p).contiguous(), right=False)
-    cutoff = cutoff.clamp_(max=vocab - 1)
-    pivot = torch.gather(sp, 1, cutoff)
-    out = probs * (probs >= pivot)
-    out /= out.sum(dim=-1, keepdim=True).clamp_min(1e-10)
+    for r0 in range(0, probs.shape[0], _RENORM_ROW_CHUNK):
+        r1 = r0 + _RENORM_ROW_CHUNK
+        row = probs[r0:r1].float()
+        # Threshold form: avoids the int64 index tile a descending sort +
+        # scatter needs, which pushed verify to OOM at bs 40.
+        sp = torch.sort(row, dim=-1).values
+        cdf = sp.cumsum(dim=-1)
+        cutoff = torch.searchsorted(
+            cdf, (1.0 - p[r0:r1]).contiguous(), right=False
+        )
+        cutoff = cutoff.clamp_(max=vocab - 1)
+        pivot = torch.gather(sp, 1, cutoff)
+        out[r0:r1] = row * (row >= pivot)
+        out[r0:r1] /= out[r0:r1].sum(dim=-1, keepdim=True).clamp_min(1e-10)
     return out
 
 

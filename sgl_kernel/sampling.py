@@ -24,7 +24,14 @@ def _row_parameter(value, probs, *, dtype):
     parameter = torch.as_tensor(value, device=probs.device, dtype=dtype)
     if parameter.numel() == 1:
         parameter = parameter.expand(probs.shape[0])
-    return parameter.reshape(-1, 1)
+    parameter = parameter.reshape(-1, 1)
+    # Renormalization runs in row chunks, so a longer parameter vector would be
+    # sliced instead of rejected.
+    if parameter.shape[0] != probs.shape[0]:
+        raise ValueError(
+            f"per-row parameter has {parameter.shape[0]} rows, probs has {probs.shape[0]}"
+        )
+    return parameter
 
 
 def top_k_renorm_prob(probs, top_ks):
